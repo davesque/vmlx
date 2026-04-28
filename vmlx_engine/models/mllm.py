@@ -736,6 +736,13 @@ class MLXMultimodalLM:
         except Exception as _e:
             logger.debug(f"mlx_vlm compat patch skipped: {_e}")
 
+        # Bundled Python doesn't include torch/torchvision (~2GB). Preemptively
+        # patch AutoVideoProcessor so models with a video_processor sub-component
+        # (Qwen3.5-VL, InternVL, etc.) load cleanly. Must run BEFORE the JANG
+        # branch below — the JANG VLM loader hits AutoProcessor too and would
+        # crash with `Qwen3VLVideoProcessor requires the Torchvision library`.
+        self._patch_video_processor()
+
         # JANG VL models: use JANG loader (handles mixed-precision + mlx-vlm sanitization)
         from ..utils.jang_loader import is_jang_model
         if is_jang_model(resolved_name):
@@ -765,10 +772,8 @@ class MLXMultimodalLM:
 
             logger.info(f"Loading MLLM: {self.model_name}")
 
-            # Bundled Python doesn't include torch/torchvision (~2GB). Preemptively
-            # patch video processor loading and suppress warnings so models with
-            # video_processor sub-components (Qwen3.5-VL, InternVL, etc.) load cleanly.
-            self._patch_video_processor()
+            # Video-processor patch was already applied above (before the JANG
+            # branch). Suppress the redundant torchvision warning here too.
             import warnings
             with warnings.catch_warnings():
                 warnings.filterwarnings("ignore", message=".*torchvision.*", category=UserWarning)
@@ -839,8 +844,12 @@ class MLXMultimodalLM:
                 try:
                     return _orig_from_pretrained.__func__(cls, pretrained_model_name_or_path, *args, **kwargs)
                 except (ValueError, ImportError) as e:
-                    if "torchvision" in str(e):
-                        logger.info("Video processor skipped (torchvision not available) — image-only mode")
+                    # Case-insensitive: transformers emits "Torchvision" (capital T)
+                    # in its requires_backends ImportError; lowercase substring match
+                    # would miss it and re-raise instead of skipping the video tower.
+                    _msg = str(e).lower()
+                    if "torchvision" in _msg or "torch library" in _msg:
+                        logger.info("Video processor skipped (torch/torchvision not available) — image-only mode")
                         return None
                     raise
 
