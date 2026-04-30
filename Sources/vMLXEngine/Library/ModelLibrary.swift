@@ -170,14 +170,23 @@ public actor ModelLibrary {
         let userDirs = database.userDirs()
         var discovered: [ModelEntry] = []
         var seenIds = Set<String>()
-        // Shard-fingerprint → already-emitted entry. HF cache is scanned
+        // Shard-fingerprint → source that emitted it. HF cache is scanned
         // first so its entry wins the slot — when the same weights are
         // ALSO in a user dir (common pattern: user mirrors mlx-community
         // models into `.mlxstudio/models/MLXModels/mlx-community/...`),
         // the user-dir copy is dropped and the picker shows one clean
         // `mlx-community/gemma-4-e2b-it-4bit` instead of two rows with
         // divergent naming.
-        var seenFingerprints: [String: ModelEntry] = [:]
+        //
+        // Cross-source ONLY: two HF-cache repos that share a fingerprint
+        // are NOT dedup'd — `shardFingerprint` is size-only and collapses
+        // any two repos with matching shard layouts (e.g., a cracked
+        // variant and its non-cracked sibling — same architecture and
+        // shard sizes, different weights). Live-observed against
+        // dealignai/Qwen3.6-27B-JANG_4M-CRACK getting silently dropped
+        // because JANGQ-AI/Qwen3.6-27B-JANG_4M sorted earlier in the HF
+        // cache walk and registered the slot first.
+        var seenFingerprints: [String: Source] = [:]
 
         // Build two ordered pass lists and run one inline enqueue loop so
         // we don't need a closure (avoids Swift-6 actor-capture churn).
@@ -194,14 +203,28 @@ public actor ModelLibrary {
             }
             guard seenIds.insert(entry.id).inserted else { continue }
             if let fp = shardFingerprint(in: url) {
-                if seenFingerprints[fp] != nil {
-                    // Same weights already emitted from another source.
-                    // Drop the id so the DB purge step doesn't think this
-                    // is a fresh removal.
-                    seenIds.remove(entry.id)
-                    continue
+                if let prev = seenFingerprints[fp] {
+                    // Skip dedup when BOTH the prior emission and the current
+                    // candidate are HF-cache repos (see comment above —
+                    // size-only fingerprints can't distinguish distinct repos
+                    // that share shard layouts). Otherwise this is a real
+                    // cross-source duplicate and we drop it.
+                    let bothHFCache: Bool = {
+                        if case .hfCache = source, case .hfCache = prev {
+                            return true
+                        }
+                        return false
+                    }()
+                    if !bothHFCache {
+                        // Same weights already emitted from another source.
+                        // Drop the id so the DB purge step doesn't think this
+                        // is a fresh removal.
+                        seenIds.remove(entry.id)
+                        continue
+                    }
+                } else {
+                    seenFingerprints[fp] = source
                 }
-                seenFingerprints[fp] = entry
             }
             discovered.append(entry)
         }
