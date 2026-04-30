@@ -449,10 +449,19 @@ public struct JangLoader: Sendable {
             // primary preference-ordered enumeration in
             // `inferBitWidthAndGroupSize` is shape-only and ignores
             // knownGroupSize.
+            // §422 — also pass the declared (defaultBits, groupSize) as
+            // a tie-break hint. When the on-disk shape is consistent
+            // with the declaration, trust the declaration; only override
+            // when the declared pair fails the shape equation. Fixes the
+            // false-positive override for `bit_widths_used: [4, 8]`
+            // models where most layers are legitimately (4, 64) but the
+            // earlier preferred-order list returned (8, 32) for the
+            // ambiguous ratio=8 case.
             let (bits, inferredGroupSize) = inferBitWidthAndGroupSize(
                 weight: weightArray, scales: scalesArray,
                 knownGroupSize: groupSize,
-                bitWidthsUsed: jangConfig.quantization.bitWidthsUsed)
+                bitWidthsUsed: jangConfig.quantization.bitWidthsUsed,
+                declared: (defaultBits, groupSize))
 
             // §410 — track disagreement against the JANG-declared default
             // for the user-facing log line below. We compare against
@@ -526,7 +535,8 @@ public struct JangLoader: Sendable {
     /// higher bits first (JANG CRITICAL tier uses the highest bits).
     public static func inferBitWidthAndGroupSize(
         weight: MLXArray, scales: MLXArray, knownGroupSize: Int? = nil,
-        bitWidthsUsed: [Int] = []
+        bitWidthsUsed: [Int] = [],
+        declared: (bits: Int, groupSize: Int)? = nil
     ) -> (bits: Int, groupSize: Int) {
         let packedDim = weight.shape.last ?? 0
         let numGroups = scales.shape.last ?? 1
@@ -545,6 +555,29 @@ public struct JangLoader: Sendable {
         }
 
         guard packedDim > 0 && numGroups > 0 else { return (4, knownGroupSize ?? 64) }
+
+        // §422 — declared-pair tie-break. The shape equation
+        //   weight.shape[-1] * 32 = bits * num_groups * group_size
+        // has multiple valid (bits, gs) solutions for any given ratio
+        // packedDim/numGroups (e.g. ratio=8 admits (8,32), (4,64), (2,128)).
+        // When the declared (bits, gs) from `jang_config.quantization`
+        // is itself a valid solution, trust it — the converter that
+        // wrote the file knows which interpretation it picked. Only fall
+        // through to the preferred-order enumeration below when the
+        // declared pair fails the shape equation (genuinely-bad config).
+        if let declared = declared {
+            let (decBits, decGs) = declared
+            if decBits > 0, decGs > 0,
+               (packedDim * 32) % decBits == 0
+            {
+                let inDim = (packedDim * 32) / decBits
+                if inDim > 0, inDim % numGroups == 0,
+                   inDim / numGroups == decGs
+                {
+                    return (decBits, decGs)
+                }
+            }
+        }
 
         // §410 — shape-authoritative bit-width inference (replaces the
         // earlier `knownGroupSize-first` path).
