@@ -39,7 +39,7 @@ echo "==> Upgrading pip..."
 echo "==> Installing dependencies..."
 "$PYTHON" -m pip install \
   "mlx>=0.29.0" "mlx-lm>=0.30.2" "mlx-vlm>=0.1.0" \
-  "transformers>=4.40.0" "tokenizers>=0.19.0" "huggingface-hub>=0.23.0" \
+  "transformers>=5.4.0" "tokenizers>=0.19.0" "huggingface-hub>=0.23.0" \
   "numpy>=1.24.0" "pillow>=10.0.0" \
   "opencv-python-headless>=4.8.0" \
   "fastapi>=0.100.0" "uvicorn>=0.23.0" \
