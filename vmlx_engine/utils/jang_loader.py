@@ -1770,6 +1770,27 @@ def _load_jang_v2_vlm(
                 for k, v in shard_weights.items()
             }
 
+        # Detect whether this shard's weights are already in post-sanitize form.
+        # Mirrors mlx_lm.qwen3_5.sanitize's gate (`should_shift_norm_weights =
+        # has_mtp_weights or has_unsanitized_conv1d`). When False, JANG already
+        # baked the +1 RMSNorm shift and the conv1d transpose into the safetensors
+        # ("mlx-native (post-sanitize)"). mlx_vlm.qwen3_5.sanitize unconditionally
+        # adds another +1 to norms — without this gate the result is double-shifted
+        # norms and garbage tokens (e.g. JANGQ-AI/Qwen3.6-27B-JANG_4M).
+        _norm_suffixes = (
+            ".input_layernorm.weight",
+            ".post_attention_layernorm.weight",
+            "model.norm.weight",
+            ".q_norm.weight",
+            ".k_norm.weight",
+        )
+        _has_mtp = any("mtp." in k for k in shard_weights)
+        _has_unsanitized_conv1d = any(
+            "conv1d.weight" in k and getattr(v, "shape", (1, 1, 1))[-1] != 1
+            for k, v in shard_weights.items()
+        )
+        _should_shift_norms = _has_mtp or _has_unsanitized_conv1d
+
         # Try model.sanitize() — works for dense VL models.
         # Fails on MoE models because it tries to split gate_up_proj which JANG already split.
         sanitize_ok = False
@@ -1782,13 +1803,6 @@ def _load_jang_v2_vlm(
 
         if not sanitize_ok:
             # Minimal sanitize: rename keys, transpose conv1d, fix norms (skip MoE rename)
-            norm_suffixes = (
-                ".input_layernorm.weight",
-                ".post_attention_layernorm.weight",
-                "model.norm.weight",
-                ".q_norm.weight",
-                ".k_norm.weight",
-            )
             fixed = {}
             for k, v in shard_weights.items():
                 if "mtp." in k:
@@ -1801,10 +1815,23 @@ def _load_jang_v2_vlm(
                     k = k.replace("lm_head", "language_model.lm_head")
                 if "conv1d.weight" in k and v.ndim == 3 and v.shape[-1] != 1:
                     v = mx.transpose(v, axes=(0, 2, 1))
-                if any(k.endswith(s) for s in norm_suffixes) and v.ndim == 1:
+                if (
+                    _should_shift_norms
+                    and any(k.endswith(s) for s in _norm_suffixes)
+                    and v.ndim == 1
+                ):
                     v = v + 1.0
                 fixed[k] = v
             shard_weights = fixed
+        elif not _should_shift_norms:
+            # model.sanitize() unconditionally shifted norms by +1 (mlx_vlm
+            # convention), but the JANG bundle is already post-sanitize. Undo
+            # the double-shift so RMSNorm gains land at the trained values.
+            for _k in list(shard_weights.keys()):
+                if any(_k.endswith(s) for s in _norm_suffixes):
+                    _v = shard_weights[_k]
+                    if getattr(_v, "ndim", 0) == 1:
+                        shard_weights[_k] = _v - 1.0
 
         # Apply vision/language sanitizers (may not exist for all model classes)
         try:
@@ -2487,10 +2514,35 @@ def _load_jang_v1_vlm(
         _pre_fix_bits_from_metadata(model, _shape_map_xshard, block_size)
         del _shape_map_xshard
 
+        # See `_load_jang_v2_vlm` for the rationale on this gate. mlx_vlm's
+        # qwen3_5/etc. sanitize unconditionally adds +1 to RMSNorm gains; for
+        # post-sanitize JANG bundles that +1 is already baked in and the second
+        # shift produces garbage tokens. Mirror mlx_lm's `should_shift_norm_weights
+        # = has_mtp or has_unsanitized_conv1d` decision.
+        _norm_suffixes = (
+            ".input_layernorm.weight",
+            ".post_attention_layernorm.weight",
+            "model.norm.weight",
+            ".q_norm.weight",
+            ".k_norm.weight",
+        )
+
         for sf in shard_files:
             shard_weights = mx.load(sf)
+            _has_mtp = any("mtp." in k for k in shard_weights)
+            _has_unsanitized_conv1d = any(
+                "conv1d.weight" in k and getattr(v, "shape", (1, 1, 1))[-1] != 1
+                for k, v in shard_weights.items()
+            )
+            _should_shift_norms = _has_mtp or _has_unsanitized_conv1d
             if hasattr(model, "sanitize"):
                 shard_weights = model.sanitize(shard_weights)
+                if not _should_shift_norms:
+                    for _k in list(shard_weights.keys()):
+                        if any(_k.endswith(s) for s in _norm_suffixes):
+                            _v = shard_weights[_k]
+                            if getattr(_v, "ndim", 0) == 1:
+                                shard_weights[_k] = _v - 1.0
             shard_weights = sanitize_weights(
                 model_class.VisionModel, shard_weights, model_config.vision_config
             )
