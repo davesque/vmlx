@@ -3895,21 +3895,11 @@ async def ollama_show(fastapi_request: Request):
     _tp = globals().get("_tool_parser")
     capabilities.append("tools")  # permissive default — most models support tools
 
-    # Vision — on when engine is MLLM mode AND the loader didn't fall
-    # back to text-only (e.g. Qwen3.5/3.6-VL hybrid SSM bundles route
-    # through the text path because the mlx_vlm Qwen3_5GatedDeltaNet is
-    # broken; image input is unavailable in that mode).
+    # Vision — on when engine is MLLM mode
     try:
         _eng = globals().get("_engine")
         if _eng is not None and getattr(_eng, "is_mllm", False):
-            _vision_disabled = False
-            try:
-                from .utils import jang_loader as _jl
-                _vision_disabled = bool(getattr(_jl, "_LAST_LOAD_VLM_FALLBACK", False))
-            except Exception:
-                pass
-            if not _vision_disabled:
-                capabilities.append("vision")
+            capabilities.append("vision")
     except Exception:
         pass
     if globals().get("_reasoning_parser") is not None:

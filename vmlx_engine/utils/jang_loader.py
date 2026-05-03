@@ -1362,38 +1362,6 @@ def _load_jang_v2_vlm(
         )
         return _load_jang_v2(path, jang_cfg, skip_eval=skip_eval, filter_expert_keys=filter_expert_keys)
 
-    # 2026-05-02: Qwen3.5/3.6-VL hybrid SSM (qwen3_5 wrapper / qwen3_5_text
-    # inner with linear_attention layers) loaded via mlx_vlm's _load_jang_v2_vlm
-    # produces incoherent garbage logits even after pre-fix bits + per-module
-    # quant overrides. Same bundle loaded via _load_jang_v2 (text path with
-    # Generalized LM-strip) produces coherent output. Reproduced live on
-    # Qwen3.6-27B-JANG_4M-CRACK with /v1/chat/completions garbage matching
-    # user screenshot. Until the deep VLM-loader divergence is identified,
-    # fall back to the text path for these bundles. mlx_vlm processor will
-    # still build for image preprocessing but text-only chat works correctly.
-    # Detection: hybrid_ssm_dense + qwen3_5 family markers.
-    _is_qwen35_vl_hybrid = (
-        config.get("model_type") in ("qwen3_5", "qwen3_5_moe", "qwen3_vl", "qwen3_vl_moe")
-        and isinstance(_tc.get("layer_types"), (list, tuple))
-        and any(t == "linear_attention" for t in _tc.get("layer_types", []))
-    )
-    if _is_qwen35_vl_hybrid:
-        logger.warning(
-            "  Qwen3.5/3.6-VL hybrid SSM detected — falling back to text-only "
-            "load (VLM-loader produces garbage on hybrid SSM bundles, "
-            "mlxstudio#95-class regression on Qwen3.6-27B-JANG_4M-CRACK). "
-            "Image input will be unavailable until deep VLM-loader fix lands. "
-            "Override: VMLX_FORCE_VLM_LOADER=1 to skip this fallback."
-        )
-        import os as _os_qfb
-        if _os_qfb.environ.get("VMLX_FORCE_VLM_LOADER") != "1":
-            # Module-level fallback marker so /api/show + UI capability lists
-            # can drop `vision` — claiming vision when image input is
-            # unavailable would mislead clients (Copilot, Continue, etc.)
-            # gating their model picker on the capabilities list.
-            globals()["_LAST_LOAD_VLM_FALLBACK"] = True
-            return _load_jang_v2(path, jang_cfg, skip_eval=skip_eval, filter_expert_keys=filter_expert_keys)
-
     # Kimi K2.6 (model_type="kimi_k25") — route through
     # jang_tools.load_jangtq_kimi_vlm so the kimi_k25 → kimi_vl remap is
     # installed in mlx_vlm.MODEL_REMAPPING + MODEL_CONFIG before dispatch,
