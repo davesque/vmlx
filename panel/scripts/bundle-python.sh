@@ -352,6 +352,32 @@ else:
             f.write(content)
 "
 
+# --- Patch: install jang_tools/mistral4_mlx.py as mlx_lm/models/mistral4.py ---
+# Mistral-Small-4-119B (and siblings) use model_type=mistral4 in
+# text_config — vmlx_engine.utils.jang_loader promotes it to the top-level
+# config and expects mlx_lm.utils.load_model to find a `mistral4` model
+# class. mlx_lm itself has no `mistral4.py`; jang_tools ships the model
+# implementation as `jang_tools/mistral4_mlx.py` with relative imports
+# (from .activations, .base, .switch_layers) that only resolve when the
+# file lives next to those siblings under mlx_lm/models/. Copy it into
+# place at bundle time so `import mlx_lm.models.mistral4` works.
+# Idempotent — re-running overwrites with current jang_tools source.
+echo "  Installing mistral4 model file (jang_tools/mistral4_mlx.py → mlx_lm/models/mistral4.py)..."
+python3 -c "
+import os, shutil, glob
+site = '$SITE'
+src_glob = os.path.join(site, 'jang_tools', 'mistral4_mlx.py')
+dst = os.path.join(site, 'mlx_lm', 'models', 'mistral4.py')
+srcs = glob.glob(src_glob)
+if not srcs:
+    print('  Skipped: jang_tools/mistral4_mlx.py not found (jang-tools too old?)')
+elif not os.path.isdir(os.path.dirname(dst)):
+    print('  Skipped: mlx_lm/models/ not found')
+else:
+    shutil.copyfile(srcs[0], dst)
+    print(f'  Installed: {dst} (from {srcs[0]})')
+"
+
 echo "==> Patches applied."
 
 # ====================================================================

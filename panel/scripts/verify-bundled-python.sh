@@ -33,6 +33,11 @@ REQUIRED = [
     ("mlx_vlm.models.gemma4", "mlx-vlm gemma4", "cherry-picked gemma4 dir missing or incomplete — re-sync from an mlx-vlm wheel that has it"),
     ("mlx_vlm.models.gemma3", "mlx-vlm gemma3", "bundled mlx-vlm gemma3 missing"),
     ("mlx_vlm.models.qwen3_vl", "mlx-vlm qwen3_vl", "bundled mlx-vlm qwen3_vl missing"),
+    # Mistral 4 model class is sourced from jang_tools/mistral4_mlx.py at
+    # bundle time (panel/scripts/bundle-python.sh) since upstream mlx_lm
+    # has no mistral4.py. Required for Mistral-Small-4-119B JANG bundles
+    # whose text_config.model_type promotes to "mistral4".
+    ("mlx_lm.models.mistral4", "mlx-lm mistral4", "missing — bundle-python.sh did not copy jang_tools/mistral4_mlx.py into mlx_lm/models/mistral4.py"),
     ("jang_tools", "jang-tools", "bundled jang-tools package missing"),
     ("jang_tools.load_jangtq", "jang_tools.load_jangtq", "JANGTQ fast-path loader missing from bundled jang-tools"),
     ("jang_tools.turboquant.tq_kernel", "jang_tools.turboquant.tq_kernel", "TQ Metal kernel runtime missing from bundled jang-tools"),
