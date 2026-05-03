@@ -56,6 +56,34 @@ class SimpleEngine(BaseEngine):
         self._abort_requested = False
         self._current_request_id: str | None = None
 
+        # JANGTQ Metal stream isolation (mirrors BatchedEngine MLLM/LLM
+        # paths, 2026-04-28). MLX streams are thread-local: every
+        # MLX kernel call (load, forward, cache extract) must run on the
+        # same thread or JANGTQ raises `Stream(gpu, N) in current thread`.
+        # asyncio.to_thread spreads calls across a multi-worker pool, so
+        # decode-time forwards land on a different thread than load and
+        # the engine produces garbage tokens / crashes on every JANGTQ
+        # chat. Pin everything to one dedicated worker.
+        from concurrent.futures import ThreadPoolExecutor
+        self._mlx_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="simple-worker"
+        )
+
+    async def _run_on_worker(self, func, *args, **kwargs):
+        """Run a sync MLX-touching call on the dedicated worker thread.
+
+        Replaces ``asyncio.to_thread`` for any MLX-using callable. asyncio's
+        default ThreadPoolExecutor has multiple workers, which violates
+        MLX's thread-local stream registry on JANGTQ bundles.
+        """
+        loop = asyncio.get_running_loop()
+        if kwargs:
+            from functools import partial
+            return await loop.run_in_executor(
+                self._mlx_executor, partial(func, *args, **kwargs)
+            )
+        return await loop.run_in_executor(self._mlx_executor, func, *args)
+
     @property
     def model_name(self) -> str:
         """Get the model name."""
@@ -96,7 +124,11 @@ class SimpleEngine(BaseEngine):
                 trust_remote_code=self._trust_remote_code,
             )
 
-        self._model.load()
+        # Load on the dedicated worker so the same thread that registers
+        # MLX streams during weight load is the thread that later runs
+        # forward(). JANGTQ kernels rely on this.
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(self._mlx_executor, self._model.load)
         self._loaded = True
         logger.info(f"SimpleEngine loaded: {self._model_name} (MLLM={self._is_mllm})")
 
@@ -120,6 +152,13 @@ class SimpleEngine(BaseEngine):
         """Stop the engine and cleanup resources."""
         self._model = None
         self._loaded = False
+        # Shut down the dedicated MLX worker so the process can exit
+        # cleanly. Don't wait — the thread is idle once the model is
+        # cleared and pending step()/generate calls have been awaited.
+        try:
+            self._mlx_executor.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            pass
         logger.info("SimpleEngine stopped")
 
     async def generate(
@@ -153,7 +192,7 @@ class SimpleEngine(BaseEngine):
 
         async with self._generation_lock:
             # Run in thread pool to allow asyncio timeout to work
-            output = await asyncio.to_thread(
+            output = await self._run_on_worker(
                 self._model.generate,
                 prompt=prompt,
                 max_tokens=max_tokens,
@@ -241,7 +280,7 @@ class SimpleEngine(BaseEngine):
                     return _sentinel
 
             while True:
-                chunk = await asyncio.to_thread(_next)
+                chunk = await self._run_on_worker(_next)
                 if chunk is _sentinel:
                     break
 
@@ -365,7 +404,7 @@ class SimpleEngine(BaseEngine):
                         k: v for k, v in extra_ct_kwargs.items()
                         if k not in ("tokenize", "add_generation_prompt")
                     })
-                output = await asyncio.to_thread(
+                output = await self._run_on_worker(
                     self._model.chat,
                     messages=messages,
                     max_tokens=max_tokens,
@@ -467,7 +506,7 @@ class SimpleEngine(BaseEngine):
 
                 # Generate inline (don't call self.generate() — we already hold
                 # _generation_lock and asyncio.Lock is not reentrant).
-                output = await asyncio.to_thread(
+                output = await self._run_on_worker(
                     self._model.generate,
                     prompt=prompt,
                     max_tokens=max_tokens,
@@ -551,7 +590,7 @@ class SimpleEngine(BaseEngine):
 
         # Build prompt using tokenizer
         if self._is_mllm:
-            # For MLLM, stream tokens one at a time via asyncio.to_thread(_next).
+            # For MLLM, stream tokens one at a time via self._run_on_worker(_next).
             # This mirrors the LLM stream_generate pattern for true per-token
             # streaming — each next() call is offloaded individually so the
             # event loop stays responsive between tokens.
@@ -578,7 +617,7 @@ class SimpleEngine(BaseEngine):
             async with self._generation_lock:
                 try:
                     # Create the synchronous iterator in a thread
-                    stream_iter = await asyncio.to_thread(
+                    stream_iter = await self._run_on_worker(
                         lambda: iter(self._model.stream_chat(
                             messages=messages,
                             max_tokens=max_tokens,
@@ -614,7 +653,7 @@ class SimpleEngine(BaseEngine):
 
                 while True:
                     try:
-                        chunk = await asyncio.to_thread(_next)
+                        chunk = await self._run_on_worker(_next)
                     except Exception as e:
                         logger.error(f"MLLM generation error: {type(e).__name__}: {e}")
                         try:
