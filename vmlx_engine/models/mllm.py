@@ -851,8 +851,15 @@ class MLXMultimodalLM:
                 try:
                     return _orig_from_pretrained.__func__(cls, pretrained_model_name_or_path, *args, **kwargs)
                 except (ValueError, ImportError) as e:
-                    if "torchvision" in str(e):
-                        logger.info("Video processor skipped (torchvision not available) — image-only mode")
+                    # Case-insensitive: transformers' TORCHVISION_IMPORT_ERROR
+                    # spells it "the Torchvision library" (capital T), so a
+                    # lowercase substring match would miss it and re-raise.
+                    # Also accept "torch library" to cover PyTorch-missing
+                    # paths some video processors take before the torchvision
+                    # check fires.
+                    _msg = str(e).lower()
+                    if "torchvision" in _msg or "torch library" in _msg:
+                        logger.info("Video processor skipped (torch/torchvision not available) — image-only mode")
                         return None
                     raise
 
