@@ -15,9 +15,11 @@ never corrupts the bundle.
 Registered patches (auto-installed on ``import vmlx_engine.runtime_patches``):
   * ``kimi_k25_mla``          — Kimi K2.6 fp32 MLA L==1 SDPA cast
   * ``deepseek_v4_register``  — DSV4 mlx_lm.models.deepseek_v4 registration
+  * ``mistral4_register``     — Mistral 4 mlx_lm.models.mistral4 registration
 """
 
 # Eagerly install every patch on first import so they land before any
 # model load path walks config.json.model_type. Safe: each register()
 # guards against already-patched state internally.
 from . import deepseek_v4_register  # noqa: F401
+from . import mistral4_register  # noqa: F401

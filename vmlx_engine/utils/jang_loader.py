@@ -548,6 +548,15 @@ def _load_jang_v2(
         config.get("model_type") == "mistral3"
         and _tc_for_model_type.get("model_type") == "mistral4"
     ):
+        # Ensure mlx_lm.models.mistral4 is importable before mlx_lm tries
+        # to dispatch on the promoted model_type. Mirrors the lazy
+        # registration that jang_tools.load_jangtq does for deepseek_v4.
+        try:
+            from vmlx_engine.runtime_patches import mistral4_register
+            mistral4_register.register()
+        except Exception as _e:
+            logger.warning(f"mistral4 runtime registration failed: {_e}")
+
         logger.info(
             "  Mistral 4 model_type promotion: top mistral3 + text_config "
             "mistral4 → loading inner text model directly via mlx_lm mistral4 "

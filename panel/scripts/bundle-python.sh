@@ -261,6 +261,46 @@ else:
             f.write(content)
 "
 
+# --- Patch: install vmlx_engine vendored mistral4 source as mlx_lm/models/mistral4.py ---
+# Mistral-Small-4-119B (and siblings) use model_type=mistral4 in text_config —
+# vmlx_engine.utils.jang_loader promotes it to the top-level config and
+# expects mlx_lm.utils.load_model to find a `mistral4` model class.
+#
+# mlx_lm itself has no `mistral4.py`. Two candidate sources exist:
+#   1. vmlx_engine/runtime_patches/_mistral4_native.py — the upstream
+#      mlx_lm-shaped implementation (uses `.mla.MultiLinear`,
+#      `.pipeline.PipelineMixin`, `.rope_utils.initialize_rope`). This
+#      matches what JANG bundles are quantized against and is what vMLX
+#      1.4.0+ ships and exercises in production.
+#   2. jang_tools/mistral4_mlx.py — older standalone draft. Mis-handles
+#      the YaRN scaling for the JANG-promoted config and produces
+#      gibberish decode tokens. Kept only as a last-resort fallback.
+#
+# Both files use relative imports (`from .mla`, `.activations`, etc.) that
+# only resolve when the file lives next to those siblings under
+# mlx_lm/models/, so we have to physically copy.
+#
+# Idempotent — re-running overwrites with the current vendored source.
+echo "  Installing mistral4 model file (vmlx_engine vendored → mlx_lm/models/mistral4.py)..."
+python3 -c "
+import os, shutil
+site = '$SITE'
+# Order matters: prefer vendored native source over jang_tools fallback.
+candidates = [
+    os.path.join(site, 'vmlx_engine', 'runtime_patches', '_mistral4_native.py'),
+    os.path.join(site, 'jang_tools', 'mistral4_mlx.py'),
+]
+src = next((p for p in candidates if os.path.isfile(p)), None)
+dst = os.path.join(site, 'mlx_lm', 'models', 'mistral4.py')
+if src is None:
+    print('  Skipped: no mistral4 source found (vmlx_engine + jang_tools both missing?)')
+elif not os.path.isdir(os.path.dirname(dst)):
+    print('  Skipped: mlx_lm/models/ not found')
+else:
+    shutil.copyfile(src, dst)
+    print(f'  Installed: {dst} (from {src})')
+"
+
 echo "==> Patches applied."
 
 # ====================================================================

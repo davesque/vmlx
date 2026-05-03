@@ -33,6 +33,12 @@ REQUIRED = [
     ("mlx_vlm.models.gemma4", "mlx-vlm gemma4", "cherry-picked gemma4 dir missing or incomplete — re-sync from an mlx-vlm wheel that has it"),
     ("mlx_vlm.models.gemma3", "mlx-vlm gemma3", "bundled mlx-vlm gemma3 missing"),
     ("mlx_vlm.models.qwen3_vl", "mlx-vlm qwen3_vl", "bundled mlx-vlm qwen3_vl missing"),
+    # Mistral 4 model class is sourced from
+    # vmlx_engine/runtime_patches/_mistral4_native.py at bundle time
+    # (panel/scripts/bundle-python.sh) since upstream mlx_lm has no
+    # mistral4.py. Required for Mistral-Small-4-119B JANG bundles whose
+    # text_config.model_type promotes to "mistral4".
+    ("mlx_lm.models.mistral4", "mlx-lm mistral4", "missing — bundle-python.sh did not copy vmlx_engine/runtime_patches/_mistral4_native.py into mlx_lm/models/mistral4.py"),
     ("jang_tools", "jang-tools", "bundled jang-tools package missing"),
     ("jang_tools.load_jangtq", "jang_tools.load_jangtq", "JANGTQ fast-path loader missing from bundled jang-tools"),
     ("jang_tools.turboquant.tq_kernel", "jang_tools.turboquant.tq_kernel", "TQ Metal kernel runtime missing from bundled jang-tools"),
@@ -130,6 +136,27 @@ try:
     print("  ok   Kimi K2.6 mlx_vlm remap + prompt_utils config")
 except Exception as e:
     print(f"  FAIL Kimi K2.6 mlx_vlm remap check: {type(e).__name__}: {e}")
+    sys.exit(1)
+
+# Mistral 4 native-impl assertion. Both the upstream-shaped vendored
+# source and the older jang_tools/mistral4_mlx.py standalone draft
+# satisfy a plain `import mlx_lm.models.mistral4`, so the import check
+# above is not enough. The standalone draft mis-handles YaRN scaling for
+# JANG-promoted configs and produces gibberish decode tokens. Assert the
+# upstream-only marker imports are present so a regression to the
+# standalone source is caught at packaging time.
+try:
+    import mlx_lm.models.mistral4 as _m4
+    import inspect
+    _src = inspect.getsource(_m4)
+    if "from .mla import MultiLinear" in _src and "from .pipeline import PipelineMixin" in _src:
+        print("  ok   Mistral 4 upstream-shaped impl in bundled mlx_lm/models/mistral4.py")
+    else:
+        print("  FAIL Mistral 4 mlx_lm/models/mistral4.py is the standalone draft, not the vendored upstream-shaped impl")
+        print("       re-run bundle-python.sh — vmlx_engine/runtime_patches/_mistral4_native.py should be the source")
+        sys.exit(1)
+except Exception as e:
+    print(f"  FAIL Mistral 4 native-impl check: {type(e).__name__}: {e}")
     sys.exit(1)
 
 print()
