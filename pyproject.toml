@@ -33,7 +33,13 @@ dependencies = [
                        # ports each. NOTE: mlx-audio 0.4.1 hard-pins 0.31.1; audio support
                        # is opt-in via [audio] extra and not in the main bundle.
     "mlx-vlm>=0.4.3",  # Gemma 4 model class added in 0.4.3
-    "transformers>=4.40.0",
+    "transformers>=5.4.0",  # 5.1–5.3 ship a buggy _patch_mistral_regex
+                            # that raises "multiple values for keyword argument
+                            # 'fix_mistral_regex'" on any tokenizer with
+                            # vocab>100k that sets fix_mistral_regex in
+                            # tokenizer_config.json (e.g. Qwen3 derivatives).
+                            # Fix is HF transformers PR #43376, first released
+                            # in 5.4.0 (2026-03-27).
     "tokenizers>=0.19.0",
     "huggingface-hub>=0.23.0",
     "numpy>=1.24.0",
