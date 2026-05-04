@@ -1016,6 +1016,29 @@ def _apply_jit_compilation():
             except Exception as _vlm_jit_err:
                 logger.warning(f"JIT: VLM language_model compile failed, running without JIT: {_vlm_jit_err}")
                 return
+            # mx.compile returns an `mlx.gc_func` that is callable but does NOT
+            # preserve the mlx.nn.Module dict-storage attribute lookup that
+            # sub-module reads rely on. For VLM wrappers whose .layers / .make_cache
+            # do `for l in self.layers` (which delegates to `self.model.layers`),
+            # the dict-storage `layers` entry on the inner Qwen3_5Model becomes
+            # unreachable through the gc_func wrapper, and every subsequent
+            # `lm.make_cache()` raises `AttributeError: 'Qwen3_5Model' object has
+            # no attribute 'layers'`. The forward-pass warmup below CAN'T detect
+            # this because gc_func is callable as-is — only attribute-access
+            # paths break. Probe make_cache() now and roll back immediately if it
+            # raises, so we don't enter request handling with a half-broken
+            # JIT'd VLM (which surfaces to the user as `finish_reason: "error"`
+            # and a single "!" token per request).
+            if hasattr(language_model, "make_cache"):
+                try:
+                    _ = language_model.make_cache()
+                except Exception as _mc_err:
+                    logger.warning(
+                        f"JIT: VLM language_model.make_cache() broken after mx.compile "
+                        f"({type(_mc_err).__name__}: {_mc_err}) — rolling back compile"
+                    )
+                    language_model.model = _pre_compile_backup_vlm
+                    return
         else:
             # LLM engine — compile the full inner module as before
             inner = getattr(model_obj, "model", model_obj)
