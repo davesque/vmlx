@@ -145,38 +145,77 @@ sed -i '' 's/if not isinstance(argument, proper_class):/if argument is not None 
 
 # 2. transformers/processing_utils.py: Skip ImportError when loading sub-processors
 #    Video processor requires torchvision; gracefully skip when unavailable.
-"$PYTHON" -c "
-import re
-path = '$SITE/transformers/processing_utils.py'
-with open(path, 'r') as f:
+#
+#    Two call paths can fail in the torch-free bundle:
+#      a) auto_processor_class.from_pretrained(...) where auto_processor_class is
+#         AutoVideoProcessor — fails inside the Auto dispatch on torchvision import.
+#      b) For processors that still declare the deprecated `<modality>_class`
+#         attribute (e.g. Qwen3VLProcessor.video_processor_class = "Qwen3VLVideoProcessor"),
+#         the loader resolves auto_processor_class to the *dummy* class via
+#         get_possibly_dynamic_module(), and then `auto_processor_class.from_pretrained`
+#         attribute access alone triggers DummyObject.__getattribute__ which calls
+#         requires_backends() → ImportError("Qwen3VLVideoProcessor requires the
+#         Torchvision library ...").
+#
+#    Wrapping the *entire* dispatch (the hasattr/get_possibly_dynamic_module branch
+#    plus the from_pretrained call) in try/except ImportError handles both. We use
+#    Python AST/text scanning to be resilient to whitespace + future additions
+#    inside the elif block (transformers 5.x grew the deprecation warning in 5.4
+#    and may grow again).
+"$PYTHON" - "$SITE/transformers/processing_utils.py" <<'PYEOF'
+import sys
+path = sys.argv[1]
+with open(path) as f:
     content = f.read()
-# Wrap the auto_processor_class.from_pretrained call in try/except ImportError
-old = '''            elif is_primary:
-                # Primary non-tokenizer sub-processor: load via Auto class
-                auto_processor_class = MODALITY_TO_AUTOPROCESSOR_MAPPING[sub_processor_type]
-                sub_processor = auto_processor_class.from_pretrained(
-                    pretrained_model_name_or_path, subfolder=subfolder, **kwargs
-                )
-                args.append(sub_processor)'''
-new = '''            elif is_primary:
-                # Primary non-tokenizer sub-processor: load via Auto class
-                auto_processor_class = MODALITY_TO_AUTOPROCESSOR_MAPPING[sub_processor_type]
-                try:
-                    sub_processor = auto_processor_class.from_pretrained(
-                        pretrained_model_name_or_path, subfolder=subfolder, **kwargs
-                    )
-                    args.append(sub_processor)
-                except ImportError:
-                    # Skip sub-processors that need unavailable backends (e.g. video needs torchvision)
-                    pass'''
-if old in content:
-    content = content.replace(old, new)
-    with open(path, 'w') as f:
-        f.write(content)
-    print('  Patched: processing_utils.py sub-processor ImportError handling')
-else:
-    print('  Already patched or structure changed: processing_utils.py sub-processor')
-"
+
+if 'vMLX bundled-python patch' in content:
+    print('  Already patched: processing_utils.py sub-processor (vMLX marker present)')
+    sys.exit(0)
+
+# Locate the elif is_primary block and wrap from `auto_processor_class = ...`
+# through `args.append(sub_processor)` in try/except ImportError. Match by
+# anchoring on the unique header lines to survive minor whitespace changes.
+import re
+pat = re.compile(
+    r'(            elif is_primary:\n'
+    r'                # Primary non-tokenizer sub-processor: load via Auto class\n)'
+    r'(                auto_processor_class = MODALITY_TO_AUTOPROCESSOR_MAPPING\[sub_processor_type\]\n'
+    r'(?:.+\n)*?'
+    r'                args\.append\(sub_processor\)\n)',
+    re.MULTILINE,
+)
+m = pat.search(content)
+if m is None:
+    print('  Skipped: processing_utils.py elif-is_primary block not found '
+          '(transformers source restructured? — patch needs update)')
+    sys.exit(0)
+
+header, body = m.group(1), m.group(2)
+indented = ''.join('    ' + line if line.strip() else line for line in body.splitlines(keepends=True))
+replacement = (
+    header
+    + '                # vMLX bundled-python patch: wrap dispatch in try/except\n'
+    + '                # ImportError so video processors that need torch/torchvision\n'
+    + '                # degrade to image-only mode in the torch-free bundle. Covers\n'
+    + '                # both AutoVideoProcessor.from_pretrained AND the deprecated\n'
+    + '                # `<modality>_class` path that resolves to a dummy class via\n'
+    + '                # get_possibly_dynamic_module (whose __getattribute__ raises\n'
+    + '                # ImportError on attribute access, including from_pretrained).\n'
+    + '                try:\n'
+    + indented
+    + '                except ImportError:\n'
+    + '                    # Skip sub-processors needing unavailable backends\n'
+    + '                    # (video → torchvision).\n'
+    + '                    pass\n'
+)
+content = content[:m.start()] + replacement + content[m.end():]
+with open(path, 'w') as f:
+    f.write(content)
+# Compile-check immediately so we never ship a syntax-broken processing_utils.py
+import ast
+ast.parse(content)
+print('  Patched: processing_utils.py sub-processor ImportError handling (vMLX)')
+PYEOF
 
 # 3. transformers/models/auto/video_processing_auto.py: Null check for extractors
 #    transformers 5.2.0 bug where extractors can be None
